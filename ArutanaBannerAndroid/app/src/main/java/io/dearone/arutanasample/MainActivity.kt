@@ -31,6 +31,7 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_home -> showScreen(HomeFragment(), "ホーム")
                 R.id.nav_news -> showScreen(NewsFragment(), "お知らせ")
                 R.id.nav_mypage -> showScreen(MyPageFragment(), "マイページ")
+                R.id.nav_log -> showScreen(LogFragment(), "通信ログ")
             }
             true
         }

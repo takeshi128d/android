@@ -36,10 +36,14 @@ class ArutanaClient(
 
     /** 広告取得の全フロー。 */
     suspend fun loadAd(placementId: Int, uid: String?): AdResult = withContext(Dispatchers.IO) {
+        DebugLog.i("LOAD", "==== 枠$placementId 広告ロード開始 (uid=$uid) ====")
+
         val setting = fetchSetting(placementId)
             ?: return@withContext AdResult.Failed("広告枠設定YAML取得失敗")
+        DebugLog.i("LOAD", "枠$placementId setting siteId=${setting.siteId} adTypeId=${setting.adTypeId} freq=${setting.frequencySetting}")
 
         if (!frequencyCap.canShow(placementId, setting.frequencySetting)) {
+            DebugLog.warn("LOAD", "枠$placementId フリークエンシーキャップ上限 → 配信なし扱い")
             return@withContext AdResult.NoAd("フリークエンシーキャップ上限")
         }
 
@@ -47,21 +51,24 @@ class ArutanaClient(
             ?: return@withContext AdResult.Failed("広告取得失敗")
 
         val requestId = resp.optStringOrNull("requestId")
-        Log.d(TAG, "requestId=$requestId placementId=$placementId")
+        if (requestId != null) DebugLog.i("AD", "requestId=$requestId")
 
         val placements = resp.optJSONArray("placements")
         if (placements == null || placements.length() == 0) {
+            DebugLog.warn("LOAD", "枠$placementId placements 空 → 配信なし・消し込み")
             return@withContext AdResult.NoAd("placements 空")
         }
         val ads = placements.getJSONObject(0).optJSONArray("ads")
         if (ads == null || ads.length() == 0) {
+            DebugLog.warn("LOAD", "枠$placementId ads 空 → 配信なし・消し込み")
             return@withContext AdResult.NoAd("ads 空")
         }
         val ad = parseAd(ads.getJSONObject(0))
         if (ad.creative.mainImageUrl.isNullOrEmpty()) {
+            DebugLog.warn("LOAD", "枠$placementId mainImageUrl 空 → 消し込み")
             return@withContext AdResult.NoAd("mainImageUrl 空")
         }
-        // 表示確定をフリークエンシーキャップに記録（実発火は imp 時）。
+        DebugLog.ok("LOAD", "枠$placementId 採用 adId=${ad.adId} imp=${ad.trackers.imp.size}件 click=${ad.link.url}")
         AdResult.Loaded(ad, requestId)
     }
 
@@ -74,25 +81,32 @@ class ArutanaClient(
 
     /** 単一トラッカーURLへGETを送る。 */
     fun fireTracker(url: String) {
+        DebugLog.req("IMP", "GET $url")
         try {
-            val (code, _) = httpGet(url) ?: return
-            Log.d(TAG, "tracker fired status=$code url=$url")
+            val (code, _) = httpGet(url) ?: run {
+                DebugLog.err("IMP", "発火失敗（通信エラー）: $url")
+                return
+            }
+            DebugLog.res("IMP", "HTTP $code")
         } catch (e: Exception) {
-            Log.w(TAG, "tracker failed: $url", e)
+            DebugLog.err("IMP", "発火失敗: ${e.message}")
         }
     }
 
     /** 画像をダウンロードする。 */
     suspend fun downloadBitmap(url: String): Bitmap? = withContext(Dispatchers.IO) {
+        DebugLog.req("IMG", "GET $url")
         try {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = TIMEOUT_MS
                 readTimeout = TIMEOUT_MS
             }
-            conn.inputStream.use { BitmapFactory.decodeStream(it) }
+            val bmp = conn.inputStream.use { BitmapFactory.decodeStream(it) }
+            DebugLog.res("IMG", if (bmp != null) "取得成功 ${bmp.width}x${bmp.height}" else "デコード失敗")
+            bmp
         } catch (e: Exception) {
-            Log.w(TAG, "image download failed: $url", e)
+            DebugLog.err("IMG", "画像取得失敗: ${e.message}")
             null
         }
     }
@@ -109,15 +123,29 @@ class ArutanaClient(
     }
 
     private fun fetchSetting(placementId: Int): PlacementSetting? {
-        settingCache[placementId]?.let { (s, day) -> if (day == today()) return s }
+        settingCache[placementId]?.let { (s, day) ->
+            if (day == today()) {
+                DebugLog.i("YAML", "枠$placementId 設定YAMLを同日キャッシュから使用")
+                return s
+            }
+        }
 
         val url = "$CONTENTS_BASE/placement-setting/$placementId.yaml"
-        val (code, body) = httpGet(url) ?: return null
-        if (code != 200) {
-            Log.w(TAG, "placement-setting status=$code ($url)")
+        DebugLog.req("YAML", "GET $url\nx-debug-id: $DEBUG_ID")
+        val (code, body) = httpGet(url) ?: run {
+            DebugLog.err("YAML", "枠$placementId 通信失敗/タイムアウト")
             return null
         }
-        val setting = parseYaml(body) ?: return null
+        DebugLog.res("YAML", "HTTP $code\n${truncate(body)}")
+        if (code != 200) {
+            DebugLog.warn("YAML", "枠$placementId 設定取得不可（status=$code）→ 配信なし扱い")
+            return null
+        }
+        val setting = parseYaml(body)
+        if (setting == null) {
+            DebugLog.err("YAML", "枠$placementId YAML解析失敗")
+            return null
+        }
         settingCache[placementId] = setting to today()
         return setting
     }
@@ -139,18 +167,29 @@ class ArutanaClient(
         }
 
         val url = "$AD_BASE/v1/ad/$NETWORK_ID"
-        val (code, resp) = httpPostJson(url, body.toString()) ?: return null
+        DebugLog.req(
+            "AD",
+            "POST $url\nContent-Type: application/json\nx-debug-id: $DEBUG_ID\n\n${body.toString(2)}"
+        )
+        val (code, resp) = httpPostJson(url, body.toString()) ?: run {
+            DebugLog.err("AD", "枠${setting.placementId} 通信失敗/タイムアウト")
+            return null
+        }
+        DebugLog.res("AD", "HTTP $code\n${truncate(resp)}")
         when {
-            code == 400 -> { Log.w(TAG, "ad HTTP 400 不正リクエスト"); return null }
-            code !in 200..299 -> { Log.w(TAG, "ad HTTP $code"); return null }
+            code == 400 -> { DebugLog.err("AD", "HTTP 400 不正リクエスト → 表示しない"); return null }
+            code !in 200..299 -> { DebugLog.warn("AD", "HTTP $code → 表示しない"); return null }
         }
         return try {
             JSONObject(resp)
         } catch (e: Exception) {
-            Log.w(TAG, "ad response parse error", e)
+            DebugLog.err("AD", "レスポンス解析失敗: ${e.message}")
             null
         }
     }
+
+    private fun truncate(s: String, max: Int = 4000): String =
+        if (s.length <= max) s else s.substring(0, max) + "…(${s.length}文字)"
 
     private fun parseAd(o: JSONObject): Ad {
         val c = o.optJSONObject("creative") ?: JSONObject()

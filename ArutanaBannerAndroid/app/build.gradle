@@ -15,7 +15,20 @@ android {
         versionName '1.0'
     }
 
+    // 固定のデバッグ鍵。CIで毎回署名が変わって上書きインストールできなくなるのを防ぐ。
+    signingConfigs {
+        debugFixed {
+            storeFile file('keystore/debug-fixed.jks')
+            storePassword 'android'
+            keyAlias 'arutanadebug'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debugFixed
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

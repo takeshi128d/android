@@ -112,6 +112,7 @@ class BannerView @JvmOverloads constructor(
         impFired = true
         val scope = scope ?: return
         val client = client ?: return
+        DebugLog.ok("BANNER", "枠$placementId 表示反映 → imp ${ad.trackers.imp.size}件を発火（viewable/inviewは未送信）")
         scope.launch {
             client.fireImpressions(ad, placementId, frequencySetting)
         }
@@ -119,11 +120,12 @@ class BannerView @JvmOverloads constructor(
 
     private fun onClickAd() {
         val url = currentAd?.link?.url ?: return
+        DebugLog.i("CLICK", "枠$placementId タップ → link.url をアプリ内ブラウザで開く\n$url")
         // link.url にクリック計測込み。別のclick計測URLは生成しない。
         try {
             CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url))
         } catch (e: Exception) {
-            // ブラウザが無い等。必要なら ACTION_VIEW にフォールバック。
+            DebugLog.err("CLICK", "ブラウザ起動失敗: ${e.message}")
         }
     }
 
