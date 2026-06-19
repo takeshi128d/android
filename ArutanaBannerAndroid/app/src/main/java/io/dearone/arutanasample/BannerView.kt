@@ -17,7 +17,8 @@ import kotlinx.coroutines.launch
  * - タップ → link.url をアプリ内ブラウザ(Custom Tabs)で開く
  *
  * bind() で枠IDと依存を設定し、load() で取得・表示する。
- * 配信なし/失敗時は、デバッグ確認しやすいよう状態テキストを薄く表示する。
+ * 配信なし / 取得失敗 / YAMLなし のときは、この View 自体を GONE にして枠を消し込む（詰める）。
+ * 原因を画面で確認したい場合は debug=true にすると理由テキストを表示する。
  */
 class BannerView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyle: Int = 0
@@ -34,6 +35,12 @@ class BannerView @JvmOverloads constructor(
     private var frequencySetting: PlacementSetting.FrequencySetting? = null
     private var impFired = false
 
+    /** true にすると配信なし/失敗時に枠を消さず理由テキストを表示する（調査用）。 */
+    var debug: Boolean = false
+
+    /** 枠の表示/非表示が変わったときの通知（見出しも一緒に消したい場合などに使用）。 */
+    var onVisibilityChanged: ((visible: Boolean) -> Unit)? = null
+
     fun bind(scope: CoroutineScope, client: ArutanaClient, placementId: Int, uid: String?) {
         this.scope = scope
         this.client = client
@@ -48,15 +55,14 @@ class BannerView @JvmOverloads constructor(
         val client = client ?: return
         impFired = false
         currentAd = null
-        binding.bannerImage.visibility = View.GONE
-        binding.caution.visibility = View.GONE
-        showStatus("広告取得中…")
+        // 取得中は枠を出さない（前回表示が残らないよう消し込んでおく）。
+        collapse()
 
         scope.launch {
             when (val r = client.loadAd(placementId, uid)) {
                 is AdResult.Loaded -> renderAd(r.ad)
-                is AdResult.NoAd -> showStatus("配信なし: ${r.reason}")
-                is AdResult.Failed -> showStatus("取得失敗: ${r.reason}")
+                is AdResult.NoAd -> hideOrDebug("配信なし: ${r.reason}")
+                is AdResult.Failed -> hideOrDebug("取得失敗: ${r.reason}")
             }
         }
     }
@@ -64,11 +70,13 @@ class BannerView @JvmOverloads constructor(
     private suspend fun renderAd(ad: Ad) {
         currentAd = ad
         val url = ad.creative.mainImageUrl
-        if (url.isNullOrEmpty()) { showStatus("mainImageUrl 空"); return }
+        if (url.isNullOrEmpty()) { hideOrDebug("mainImageUrl 空"); return }
 
         val bmp = client?.downloadBitmap(url)
-        if (bmp == null) { showStatus("画像取得失敗"); return }
+        if (bmp == null) { hideOrDebug("画像取得失敗"); return }
 
+        // 広告あり → 枠を表示。
+        visibility = View.VISIBLE
         binding.bannerImage.setImageBitmap(bmp)
         binding.bannerImage.visibility = View.VISIBLE
         binding.status.visibility = View.GONE
@@ -77,9 +85,26 @@ class BannerView @JvmOverloads constructor(
         if (!caution.isNullOrEmpty()) {
             binding.caution.text = caution
             binding.caution.visibility = View.VISIBLE
+        } else {
+            binding.caution.visibility = View.GONE
         }
 
+        onVisibilityChanged?.invoke(true)
         fireImpressionOnce(ad)
+    }
+
+    /** 枠を消し込む（高さ0で詰める）。 */
+    private fun collapse() {
+        binding.bannerImage.visibility = View.GONE
+        binding.caution.visibility = View.GONE
+        binding.status.visibility = View.GONE
+        visibility = View.GONE
+        onVisibilityChanged?.invoke(false)
+    }
+
+    /** 配信なし/失敗時: 通常は消し込み、debug=true のときだけ理由を表示。 */
+    private fun hideOrDebug(reason: String) {
+        if (debug) showStatus(reason) else collapse()
     }
 
     private fun fireImpressionOnce(ad: Ad) {
@@ -103,8 +128,10 @@ class BannerView @JvmOverloads constructor(
     }
 
     private fun showStatus(msg: String) {
+        visibility = View.VISIBLE
         binding.status.visibility = View.VISIBLE
         binding.status.text = msg
         binding.bannerImage.visibility = View.GONE
+        onVisibilityChanged?.invoke(true)
     }
 }
